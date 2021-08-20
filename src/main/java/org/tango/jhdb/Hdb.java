@@ -324,13 +324,11 @@ public class Hdb {
       System.out.println(" (" + data[0].size() + "/" + data[1].size());
       for(int i=0;i<data[0].size() && i<10;i++)
         System.out.println("  Rec #"+i+" :"+data[0].get(i) + " <=> " + data[1].get(i));
-      */
 
       // Double RO
       test(hdb,"05/11/2018 12:00:00","05/11/2018 13:00:00",
           "tango://orion.esrf.fr:10000/sr/d-ct/1/current");
 
-      /*
       // Double RW
       test(hdb,"09/07/2015 12:00:00","09/07/2015 13:00:00",
           "tango://orion.esrf.fr:10000/elin/gun/hv/highvoltage");  
@@ -338,13 +336,11 @@ public class Hdb {
       // Float RO
       test(hdb,"09/07/2015 01:00:00","10/07/2015 01:00:00",
           "tango://orion.esrf.fr:10000/sr/d-temp/c25bpm/chamber1");
-      */
 
       // DoulbeArr RO
       test(hdb,"01/11/2018 00:00:00","01/11/2018 01:00:00",
           "tango://orion.esrf.fr:10000/tl1/d-ct/ict-1/bunchcharges");
 
-      /*
       // DoulbeArr RW
       test(hdb,"09/07/2015 12:00:00","09/07/2015 13:00:00",
           "tango://orion.esrf.fr:10000/sr/st-v/all/current");
@@ -376,6 +372,13 @@ public class Hdb {
       // INT64 or ULONG
       test(hdb,"09/07/2015 12:00:00","10/07/2015 12:00:00",
           "tango://orion.esrf.fr:10000/id-corr/12/correction/nberrors");
+          */
+
+      // USHORT
+      test(hdb,"20/08/2021 11:30:00","20/08/2021 11:31:00",
+              "tango://acs.esrf.fr:10000/test/jlp/1/att_ushortspectrum");
+
+      /*
 
       System.out.println("\n--------> History config test: ");
 

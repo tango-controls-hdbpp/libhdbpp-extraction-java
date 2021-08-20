@@ -723,9 +723,29 @@ public class PostgreSQLSchema extends HdbReader {
   private void convertArray(ArrayList<Object> v,Array a) throws SQLException {
 
     if(a!=null) {
-      Object[] objects = (Object[]) a.getArray();
-      for(int i=0;i<objects.length;i++)
-        v.add(objects[i]);
+
+      // postgre JDBC does not handle unsigned array !
+      if( a.getBaseTypeName().startsWith("u")) {
+        String value = a.toString();
+        if(value.startsWith("{") && value.endsWith("}")) {
+          value = value.substring(1,value.length()-1);
+          String[] valStr = value.split(",");
+          try {
+            for (int i = 0; i < valStr.length; i++)
+              v.add(new Long(Long.parseLong(valStr[i])));
+          } catch (NumberFormatException e) {
+            throw new SQLException("Postgre JDBC driver does not handle " + a.getBaseType());
+          }
+        } else {
+          // Cannot perform best effort
+          throw new SQLException("Postgre JDBC driver does not handle " + a.getBaseTypeName());
+        }
+      } else {
+        Object[] objects = (Object[]) a.getArray();
+        for (int i = 0; i < objects.length; i++)
+          v.add(objects[i]);
+      }
+
     }
 
   }
