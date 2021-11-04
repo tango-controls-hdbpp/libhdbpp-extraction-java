@@ -35,6 +35,8 @@ package org.tango.jhdb;
 
 import org.tango.jhdb.data.HdbData;
 import java.util.Set;
+import java.util.Map;
+import java.util.HashMap;
 
 /**
  * Signal info structure
@@ -340,8 +342,37 @@ public class SignalInfo {
    * Returns true if this signal is aggregated data, false if it is raw.
    */
   public boolean isAggregate() {
-        return Interval.isAggregate(interval);
+    return Interval.isAggregate(interval);
+  }
+
+  /**
+   * Returns true if this signal is aggregated data, false if it is raw.
+   */
+  public String getAggregateQueryList(Map<HdbData.Aggregate, Integer> indexes) {
+    int idx = 0;
+    int nbAggregates = aggregates.size();
+    StringBuffer queryList = new StringBuffer();
+    
+    if(indexes == null)
+    {
+      indexes = new HashMap<>();
     }
+    
+    for(HdbData.Aggregate agg : aggregates)
+    {
+      queryList.append(agg.toString());
+      
+      if(idx != nbAggregates - 1)
+      {
+        queryList.append(", ");
+      }
+      
+      indexes.put(agg, idx);
+      ++idx;
+    }
+    
+    return queryList.toString();
+  }
 
   public String toString() {
     return "Id=" + sigId + ", Type=" + dataType.toString() + ", Format=" + format.toString() + ", Access=" + access.toString()+ ", Interval=" + interval.toString();
