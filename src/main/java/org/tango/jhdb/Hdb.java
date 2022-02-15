@@ -132,15 +132,14 @@ public class Hdb {
    */
   public void connectMySQL(String host,String db,String user,String passwd,short port) throws HdbFailed {
     hdbType = HDB_MYSQL;
-    schema = new MySQLSchema(host,db,user,passwd,port);
+    schema = MySQLSchema.createSchema(host,db,user,passwd,port);
   }
 
   /**
    * Connects to a MySQL HDB.
    */
   public void connectMySQL() throws HdbFailed {
-    hdbType = HDB_MYSQL;
-    schema = new MySQLSchema(null,null,null,null,(short)0);
+      connectMySQL(null, null, null, null, (short)0);
   }
 
   /**

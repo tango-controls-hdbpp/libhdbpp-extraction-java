@@ -47,7 +47,7 @@ public class MySQLSchema extends HdbReader {
   public static final String DEFAULT_DB_URL_PREFIX = "jdbc:mysql://";
   public static final int    DEFAULT_DB_PORT = 3306;
 
-  private final static String[] tableNames = {
+  protected final static String[] tableNames = {
 
       "",
       "att_scalar_devdouble_ro",
@@ -111,10 +111,116 @@ public class MySQLSchema extends HdbReader {
   };
 
   // Notify every PROGRESS_NBROW rows
-  private final static int PROGRESS_NBROW =10000;
-  private Connection connection;
-  private AttributeBrowser browser=null;
-  private String dbURL;
+  protected final static int PROGRESS_NBROW =10000;
+  protected Connection connection;
+  protected AttributeBrowser browser=null;
+  protected String dbURL;
+
+  private static boolean checkLightSchema(Connection c) throws HdbFailed
+  {
+    ArrayList<String> list = new ArrayList<>();
+
+    String query = "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_NAME = 'att_conf';";
+
+    try {
+      Statement statement = c.createStatement(ResultSet.TYPE_FORWARD_ONLY,ResultSet.CONCUR_READ_ONLY);
+      ResultSet resultSet = statement.executeQuery(query);
+      while (resultSet.next())
+        list.add(resultSet.getString(1));
+      statement.close();
+    } catch (SQLException e) {
+      throw new HdbFailed("Failed to retrieve engine mode: "+e.getMessage());
+    }
+
+    return list.get(0).equalsIgnoreCase("InnoDB");
+  }
+
+  public static MySQLSchema createSchema(String host, String db, String user, String passwd, short port) throws HdbFailed
+  {
+    if(host==null || host.isEmpty()) {
+      host = System.getenv("HDB_MYSQL_HOST");
+      if (host==null || host.isEmpty()) {
+        host = System.getProperty("HDB_MYSQL_HOST");
+        if (host==null || host.isEmpty())
+          throw new HdbFailed("host input parameter cannot be null if HDB_MYSQL_HOST variable is not defined");
+      }
+    }
+
+    if(user==null || user.isEmpty()) {
+      user = System.getenv("HDB_USER");
+      if (user==null || user.isEmpty()) {
+        user = System.getProperty("HDB_USER");
+        if (user==null || user.isEmpty())
+          user = DEFAULT_DB_USER;
+      }
+    }
+
+    if(passwd==null || passwd.isEmpty()) {
+      passwd = System.getenv("HDB_PASSWORD");
+      if (passwd==null || passwd.isEmpty()) {
+        passwd = System.getProperty("HDB_PASSWORD");
+        if (passwd==null || passwd.isEmpty())
+          passwd = DEFAULT_DB_PASSWORD;
+      }
+    }
+
+    if(db==null || db.isEmpty()) {
+      db = System.getenv("HDB_NAME");
+      if (db==null || db.isEmpty()) {
+        db = System.getProperty("HDB_NAME");
+        if (db==null || db.isEmpty())
+          db = DEFAULT_DB_NAME;
+      }
+    }
+
+    if(port==0) {
+      String pStr = System.getenv("HDB_MYSQL_PORT");
+      if(pStr==null || passwd.isEmpty())
+        port = DEFAULT_DB_PORT;
+      else {
+        try {
+          port = (short)Integer.parseInt(pStr);
+        } catch (NumberFormatException e) {
+          throw new HdbFailed("Invalid HDB_MYSQL_PORT variable " + e.getMessage());
+        }
+      }
+    }
+
+    try {
+
+      Properties connectProperties = new Properties();
+      connectProperties.setProperty("user", user);
+      connectProperties.setProperty("password", passwd);
+      connectProperties.setProperty("loginTimeout", Integer.toString(10));
+      connectProperties.setProperty("tcpKeepAlive ", "true"); //Enable TCP keep-alive probe
+
+      // URL example: jdbc:postgresql://host:port/database
+      String dbURL = DEFAULT_DB_URL_PREFIX + host + ":" +
+          Integer.toString(port) + "/" + db;
+
+      Connection connection = DriverManager.getConnection(dbURL, connectProperties);
+
+        boolean isLightSchema = checkLightSchema(connection);
+        if(isLightSchema)
+        {
+            return new MySQLLightSchema(dbURL, connection);
+        }
+        else
+        {
+            return new MySQLSchema(dbURL, connection);
+        }
+
+    } catch (SQLException e) {
+      throw new HdbFailed("Failed to connect to MySQL: "+e.getMessage());
+    }
+  }
+
+
+  public MySQLSchema(String url, Connection c) throws HdbFailed
+  {
+      connection = c;
+      dbURL = url;
+  }
 
   /**
    * Connects to a MySQL HDB.
@@ -126,7 +232,8 @@ public class MySQLSchema extends HdbReader {
    * @throws HdbFailed in case of failure
    */
 
-  public MySQLSchema(String host,String db,String user,String passwd,short port) throws HdbFailed {
+  public MySQLSchema(String host,String db,String user,String passwd,short port) throws HdbFailed
+  {
 
     if(host==null || host.isEmpty()) {
       host = System.getenv("HDB_MYSQL_HOST");
@@ -434,7 +541,7 @@ public class MySQLSchema extends HdbReader {
 
   // ---------------------------------------------------------------------------------------
 
-  private HdbDataSet getArrayData(SignalInfo info,
+  protected HdbDataSet getArrayData(SignalInfo info,
                                   String sigId,
                                   String start_date,
                                   String stop_date) throws HdbFailed {
@@ -575,7 +682,7 @@ public class MySQLSchema extends HdbReader {
 
   // ---------------------------------------------------------------------------------------
 
-  private HdbDataSet getScalarData(SignalInfo info,
+  protected HdbDataSet getScalarData(SignalInfo info,
                                    String sigId,
                                    String start_date,
                                    String stop_date) throws HdbFailed {
@@ -666,7 +773,7 @@ public class MySQLSchema extends HdbReader {
   }
 
 
-  private long timeValue(Timestamp ts) {
+  protected long timeValue(Timestamp ts) {
 
     long ret = ts.getTime();
     ret = ret / 1000;
@@ -678,7 +785,7 @@ public class MySQLSchema extends HdbReader {
 
   }
 
-  private String toDBDate(String date) {
+  protected String toDBDate(String date) {
 
    // In:   09/07/2015 12:00:00
    // Out:  2015-07-09 12:00:00
