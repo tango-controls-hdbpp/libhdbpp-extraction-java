@@ -41,6 +41,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.List;
+import java.util.SortedSet;
 
 /**
  * PostgreSQL database access
@@ -275,28 +276,163 @@ public class PostgreSQLSchema extends HdbReader {
 
   }
 
-  HdbDataSet getDataFromDB(SignalInfo sigInfo,
-                           String start_date,
-                           String stop_date) throws HdbFailed {
-
-    if (sigInfo == null)
-      throw new HdbFailed("sigInfo input parameters is null");
-
-    checkDates(start_date, stop_date);
-
-    boolean isRW = sigInfo.isRW();
-    boolean isWO = sigInfo.access == SignalInfo.Access.WO;
-    boolean isAggregate = sigInfo.isAggregate();
-
-    String query;
-    int queryCount = 0;
-
-    connectionCheck();
-
-    String tablename;
-    if(isAggregate)
+  /**
+   * Build the aggragate list for the query, and store the column indexes for later processing..
+   */
+  private String getAggregateQueryList(SignalInfo sigInfo, Map<HdbData.Aggregate, Integer> indexes) {
+    int idx = 0;
+    int nbAggregates = sigInfo.aggregates.size();
+    StringBuffer queryList = new StringBuffer();
+    
+    if(indexes == null)
     {
-      tablename = "cagg_" + sigInfo.tableName.substring(4) + "_" + sigInfo.interval.toString();
+      indexes = new HashMap<>();
+    }
+    
+    for(HdbData.Aggregate agg : sigInfo.aggregates)
+    {
+      queryList.append(agg.toString());
+      
+      if(idx != nbAggregates - 1)
+      {
+        queryList.append(", ");
+      }
+      
+      indexes.put(agg, idx);
+      ++idx;
+    }
+    
+    return queryList.toString();
+  }
+
+
+  private String buildQuery(SignalInfo sigInfo, String tablename, SortedSet<SignalInfo.Range> ranges, Map<HdbData.Aggregate, Map<Integer, Boolean>> agg_idxes, boolean isAggregate, boolean isRW, boolean isWO)
+  {
+      String query;
+      if(isAggregate)
+      {
+          int idx = 0;
+          if( agg_idxes == null)
+          {
+              agg_idxes = new HashMap<>();
+          }
+
+          StringBuilder queryBuilder = new StringBuilder();
+          queryBuilder.append("SELECT data_time");
+
+          // special cases for count_rows and count_errors, as they are never arrrays.
+          if(sigInfo.aggregates.contains(HdbData.Aggregate.ROWS_COUNT))
+          {
+              queryBuilder.append(", ");
+              queryBuilder.append(HdbData.Aggregate.ROWS_COUNT.toString());
+              Map<Integer, Boolean> ret = new HashMap<>();
+              ret.put(idx++, false);
+              agg_idxes.put(HdbData.Aggregate.ROWS_COUNT, ret);
+          }
+          if(sigInfo.aggregates.contains(HdbData.Aggregate.ERRORS_COUNT))
+          {
+              queryBuilder.append(", ");
+              queryBuilder.append(HdbData.Aggregate.ERRORS_COUNT.toString());
+              Map<Integer, Boolean> ret = new HashMap<>();
+              ret.put(idx++, false);
+              agg_idxes.put(HdbData.Aggregate.ERRORS_COUNT, ret);
+          }
+
+          for(SignalInfo.Range r : ranges)
+          {
+              for(HdbData.Aggregate agg : sigInfo.aggregates)
+              {
+                  // Do not treat rows and error count
+                  if(agg == HdbData.Aggregate.ROWS_COUNT || agg == HdbData.Aggregate.ERRORS_COUNT)
+                      continue;
+
+                  queryBuilder.append(", ");
+                  queryBuilder.append(agg.toString());
+                  queryBuilder.append(r.toString());
+                  if(!agg_idxes.containsKey(agg))
+                  {
+                      agg_idxes.put(agg, new HashMap<>());
+                  }
+                  boolean isArray = (sigInfo.isArray() && r == SignalInfo.Range.FULL_RANGE) || r.size() > 1;
+                  agg_idxes.get(agg).put(idx++, isArray);
+              }
+          }
+
+          queryBuilder.append(" FROM " + tablename +
+                " WHERE att_conf_id= ?" +
+                " AND data_time>= ?" +
+                " AND data_time<= ?" +
+                " ORDER BY data_time ASC");
+
+          query = queryBuilder.toString();
+      }
+      else
+      {
+          if(ranges.isEmpty())
+          {
+              String rwField = (isRW | isWO) ? ",value_w" : "";
+              query = "SELECT data_time,att_error_desc.error_desc as error_desc,quality,value_r" + rwField +
+                  " FROM " + tablename +
+                  " left outer join att_error_desc on " + tablename + ".att_error_desc_id = att_error_desc.att_error_desc_id" +
+                  " WHERE att_conf_id= ?" +
+                  " AND data_time>= ?" +
+                  " AND data_time<= ?" +
+                  " ORDER BY data_time ASC";
+          }
+          else
+          {
+              StringBuilder queryBuilder = new StringBuilder();
+              queryBuilder.append("SELECT data_time, att_error_desc.error_desc as error_desc, quality");
+              for(SignalInfo.Range i : ranges)
+              {
+                  queryBuilder.append(", value_r");
+                  queryBuilder.append(i);
+                  if(isRW | isWO)
+                  {
+                      queryBuilder.append(", value_w");
+                      queryBuilder.append(i);
+                  }
+              }
+              queryBuilder.append(" FROM ");
+              queryBuilder.append(tablename);
+              queryBuilder.append(" left outer join att_error_desc on ");
+              queryBuilder.append(tablename);
+              queryBuilder.append(".att_error_desc_id = att_error_desc.att_error_desc_id");
+              queryBuilder.append(" WHERE att_conf_id=? AND data_time>= ? AND data_time<= ? ORDER BY data_time ASC");
+
+              query = queryBuilder.toString();
+          }
+      }
+
+      return query;
+  }
+
+  HdbDataSet getDataFromDB(SignalInfo sigInfo,
+          String start_date,
+          String stop_date) throws HdbFailed {
+
+      if (sigInfo == null)
+          throw new HdbFailed("sigInfo input parameters is null");
+
+      checkDates(start_date, stop_date);
+
+      boolean isRW = sigInfo.isRW();
+      boolean isWO = sigInfo.access == SignalInfo.Access.WO;
+      boolean isAggregate = sigInfo.isAggregate();
+      SortedSet<SignalInfo.Range> ranges = sigInfo.getRanges();
+    
+      // Cache the prepared statement only for not aggregates quries that target a full range. 
+      boolean isCacheable = !isAggregate && ranges.contains(SignalInfo.Range.FULL_RANGE);
+
+      String query;
+      int queryCount = 0;
+
+      connectionCheck();
+
+      String tablename;
+      if(isAggregate)
+      {
+          tablename = "cagg_" + sigInfo.tableName.substring(4) + "_" + sigInfo.interval.toString();
     }
     else
     {
@@ -328,83 +464,362 @@ public class PostgreSQLSchema extends HdbReader {
 
     // Fetch data
     PreparedStatement statement;
-    Map<HdbData.Aggregate, Integer> agg_idxes = new HashMap<>();
-    if(!prepQueries.containsKey(sigInfo)) {
-      if(isAggregate) {
-        String agg_query = sigInfo.getAggregateQueryList(agg_idxes);
-        query = "SELECT data_time, " + agg_query +
-                " FROM " + tablename +
-                " WHERE att_conf_id= ?" +
-                " AND data_time>= ?" +
-                " AND data_time<= ?" +
-                " ORDER BY data_time ASC";
-        try {
-          statement = connection.prepareStatement(query, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-        } catch (SQLException e) {
-          throw new HdbFailed("An error occurred upon query preparation for query: " + query);
+
+    Map<HdbData.Aggregate, Map<Integer, Boolean>> agg_idxes = new HashMap<>();
+    if(isCacheable)
+    {
+        if(!prepQueries.containsKey(sigInfo)) {
+
+            query = buildQuery(sigInfo, tablename, ranges, agg_idxes, isAggregate, isRW, isWO);
+
+            try {
+                prepQueries.put(sigInfo, connection.prepareStatement(query, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY));
+            } catch (SQLException e) {
+                throw new HdbFailed("An error occurred upon query preparation for query: " + query);
+            }
         }
-      }
-      else
-      {
-        String rwField = (isRW | isWO) ? ",value_w" : "";
-        query = "SELECT data_time,att_error_desc.error_desc as error_desc,quality,value_r" + rwField +
-                " FROM " + tablename +
-                " left outer join att_error_desc on " + sigInfo.tableName + ".att_error_desc_id = att_error_desc.att_error_desc_id" +
-                " WHERE att_conf_id= ?" +
-                " AND data_time>= ?" +
-                " AND data_time<= ?" +
-                " ORDER BY data_time ASC";
-        try {
-          prepQueries.put(sigInfo, connection.prepareStatement(query, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY));
-        } catch (SQLException e) {
-          throw new HdbFailed("An error occurred upon query preparation for query: " + query);
-        }
+
+        //retrieve prepared statement
         statement = prepQueries.get(sigInfo);
-      }
 
     }
     else
     {
-      //retrieve prepared statement
-      statement = prepQueries.get(sigInfo);
+        query = buildQuery(sigInfo, tablename, ranges, agg_idxes, isAggregate, isRW, isWO);
+        try
+        {
+            statement = connection.prepareStatement(query, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+        } catch (SQLException e) {
+          throw new HdbFailed("An error occurred upon query preparation for query: " + query);
+        }
     }
 
     ArrayList<HdbData> ret = new ArrayList<>();
 
     try {
-
-      //fill the placeholders
-      statement.setInt(1, Integer.parseInt(sigInfo.sigId));
-      statement.setTimestamp(2, Timestamp.valueOf(toDBDate(start_date)));
-      statement.setTimestamp(3, Timestamp.valueOf(toDBDate(stop_date)));
-      
-      if(sigInfo.isArray())
-        statement.setFetchSize(arrayFetchSize);
-      else
-        statement.setFetchSize(fetchSize);
+        
+        //fill the placeholders
+        statement.setInt(1, Integer.parseInt(sigInfo.sigId));
+        statement.setTimestamp(2, Timestamp.valueOf(toDBDate(start_date)));
+        statement.setTimestamp(3, Timestamp.valueOf(toDBDate(stop_date)));
+     
+        if(sigInfo.isArray())
+            statement.setFetchSize(arrayFetchSize);
+        else
+            statement.setFetchSize(fetchSize);
 
       //execute query
       ResultSet rs = statement.executeQuery();
 
       if(isAggregate)
       {
-        extractAggregateData(rs, sigInfo, isRW, isWO, queryCount, agg_idxes, ret);
+        extractAggregateData(rs, sigInfo, ranges, isRW, isWO, queryCount, agg_idxes, ret);
 	// For aggregates we do not cache the statement, so we have to close it.
 	statement.close();
       }
       else
       {
-        extractRawData(rs, sigInfo, isRW, isWO, queryCount, ret);
+        extractRawData(rs, sigInfo, ranges, isRW, isWO, queryCount, ret);
+
+        if(!isCacheable)
+	    statement.close();
       }
 
     } catch (SQLException e) {
-      throw new HdbFailed("Failed to get data: " + e.getMessage());
+      throw new HdbFailed("Failed to get data for query:\n" + statement.toString() + "\n" + e.getMessage());
     }
 
     return new HdbDataSet(ret);
   }
 
-  private void extractRawData(ResultSet rs, SignalInfo sigInfo, boolean isRW, boolean isWO, int queryCount, List<HdbData> data) throws SQLException, HdbFailed
+  private void extractValue(SignalInfo sigInfo, ResultSet rs, int idx, List<Object> value, List<Object> wvalue, boolean isWO, boolean isW) throws SQLException
+  {
+      extractValue(sigInfo, rs, idx, value, wvalue, isWO, isW, false);
+  }
+
+  private int extractValue(SignalInfo sigInfo, ResultSet rs, int idx, List<Object> value, List<Object> wvalue, boolean isWO, boolean isW, boolean increment) throws SQLException
+  {
+      int ret_idx = idx;
+        switch(sigInfo.dataType)
+        {
+          case BOOLEAN:
+            if(!isWO)
+            {
+              value.add(rs.getBoolean(idx));
+              ++ret_idx;
+            }
+            if(isW)
+            {
+                if(increment)
+                {
+                    wvalue.add(rs.getBoolean(ret_idx));
+                    ++ret_idx;
+                }
+                else
+                {
+                    wvalue.add(rs.getBoolean(idx + 1));
+                }
+            }
+            break;
+          case SHORT:
+          case UCHAR:
+          case LONG:
+          case USHORT:
+          case STATE:
+          case LONG64:
+          case ULONG:
+            if(!isWO)
+            {
+              value.add(rs.getLong(idx));
+              ++ret_idx;
+            }
+            if(isW)
+            {
+                if(increment)
+                {
+                    wvalue.add(rs.getLong(ret_idx));
+                    ++ret_idx;
+                }
+                else
+                {
+                    wvalue.add(rs.getLong(idx + 1));
+                }
+            }
+            break;
+          case DOUBLE:
+            if(!isWO)
+            {
+              value.add(rs.getDouble(idx));
+              ++ret_idx;
+            }
+            if(isW)
+            {
+                if(increment)
+                {
+                    wvalue.add(rs.getDouble(ret_idx));
+                    ++ret_idx;
+                }
+                else
+                {
+                    wvalue.add(rs.getDouble(idx + 1));
+                }
+            }
+            break;
+          case FLOAT:
+            if(!isWO)
+            {
+              value.add(rs.getFloat(idx));
+              ++ret_idx;
+            }
+            if(isW)
+            {
+                if(increment)
+                {
+                    wvalue.add(rs.getFloat(ret_idx));
+                    ++ret_idx;
+                }
+                else
+                {
+                    wvalue.add(rs.getFloat(idx + 1));
+                }
+            }
+            break;
+          case STRING:
+            if(!isWO)
+            {
+              value.add(rs.getString(idx));
+              ++ret_idx;
+            }
+            if(isW)
+            {
+                if(increment)
+                {
+                    wvalue.add(rs.getString(ret_idx));
+                    ++ret_idx;
+                }
+                else
+                {
+                    wvalue.add(rs.getString(idx + 1));
+                }
+            }
+            break;
+        }
+      return ret_idx;
+  }
+
+  private void extractAggregates(Map<HdbData.Aggregate, Map<Integer, Boolean>> indexes, ResultSet rs, SignalInfo.Type dataType, List<Long> count_rows, List<Long> count_errors, List<Long> count_r, List<Long> count_nan_r, List<Double> mean_r, List<Number> min_r, List<Number> max_r, List<Double> stddev_r, List<Long> count_w, List<Long> count_nan_w, List<Double> mean_w, List<Number> min_w, List<Number> max_w, List<Double> stddev_w) throws SQLException
+  {
+      for(Map.Entry<HdbData.Aggregate, Map<Integer, Boolean>> agg_idx : indexes.entrySet())
+      {
+          HdbData.Aggregate agg = agg_idx.getKey();
+          for(Map.Entry<Integer, Boolean> i : agg_idx.getValue().entrySet())
+          {
+              // We add 2 because indexing start at 1 for sql result
+              // and the first one is always the timestamp.
+              int idx = i.getKey() + 2;
+              boolean isArray = i.getValue();
+              switch(agg)
+              {
+                  case ROWS_COUNT:
+                      {
+                          count_rows.add(rs.getLong(idx));
+                          break;
+                      }
+                  case ERRORS_COUNT:
+                      {
+                          count_errors.add(rs.getLong(idx));
+                          break;
+                      }
+                  case COUNT_R:
+                      {
+                          if(isArray)
+                          {
+                              convertLongArray(count_r, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              count_r.add(rs.getLong(idx));
+                          }
+                          break;
+                      }
+                  case NAN_COUNT_R:
+                      {
+                          if(isArray)
+                          {
+                              convertLongArray(count_nan_r, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              count_nan_r.add(rs.getLong(idx));
+                          }
+                          break;
+                      }
+                  case MEAN_R:
+                      {
+                          if(isArray)
+                          {
+                              convertDoubleArray(mean_r, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              mean_r.add(rs.getDouble(idx));
+                          }
+                          break;
+                      }
+                  case MIN_R:
+                      {
+                          if(isArray)
+                          {
+                              convertNumberArray(min_r, rs.getArray(idx), dataType);
+                          }
+                          else
+                          {
+                              min_r.add(extractNumber(rs, idx, dataType));
+                          }
+                          break;
+                      }
+                  case MAX_R:
+                      {
+                          if(isArray)
+                          {
+                              convertNumberArray(max_r, rs.getArray(idx), dataType);
+                          }
+                          else
+                          {
+                              max_r.add(extractNumber(rs, idx, dataType));
+                          }
+                          break;
+                      }
+                  case STDDEV_R:
+                      {
+                          if(isArray)
+                          {
+                              convertDoubleArray(stddev_r, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              stddev_r.add(rs.getDouble(idx));
+                          }
+                          break;
+                      }
+                  case COUNT_W:
+                      {
+                          if(isArray)
+                          {
+                              convertLongArray(count_w, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              count_w.add(rs.getLong(idx));
+                          }
+                          break;
+                      }
+                  case NAN_COUNT_W:
+                      {
+                          if(isArray)
+                          {
+                              convertLongArray(count_nan_w, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              count_nan_w.add(rs.getLong(idx));
+                          }
+                          break;
+                      }
+                  case MEAN_W:
+                      {
+                          if(isArray)
+                          {
+                              convertDoubleArray(mean_w, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              mean_w.add(rs.getDouble(idx));
+                          }
+                          break;
+                      }
+                  case MIN_W:
+                      {
+                          if(isArray)
+                          {
+                              convertNumberArray(min_w, rs.getArray(idx), dataType);
+                          }
+                          else
+                          {
+                              min_w.add(extractNumber(rs, idx, dataType));
+                          }
+                          break;
+                      }
+                  case MAX_W:
+                      {
+                          if(isArray)
+                          {
+                              convertNumberArray(max_w, rs.getArray(idx), dataType);
+                          }
+                          else
+                          {
+                              max_w.add(extractNumber(rs, idx, dataType));
+                          }
+                          break;
+                      }
+                  case STDDEV_W:
+                      {
+                          if(isArray)
+                          {
+                              convertDoubleArray(stddev_w, rs.getArray(idx));
+                          }
+                          else
+                          {
+                              stddev_w.add(rs.getDouble(idx));
+                          }
+                          break;
+                      }
+              }
+          }
+      }
+  }
+
+  private void extractRawData(ResultSet rs, SignalInfo sigInfo, SortedSet<SignalInfo.Range> ranges, boolean isRW, boolean isWO, int queryCount, List<HdbData> data) throws SQLException, HdbFailed
   {
     long dTime = 0;
     String errorMsg = null;
@@ -425,44 +840,41 @@ public class PostgreSQLSchema extends HdbReader {
         wvalue.clear();
       if(sigInfo.isArray())
       {
-        if(!isWO)
-          convertArray(value, rs.getArray(4));
-        if(isW) convertArray(wvalue, rs.getArray(5));
+          if(ranges.contains(SignalInfo.Range.FULL_RANGE))
+          {
+            if(!isWO)
+              convertArray(value, rs.getArray(4));
+            if(isW) convertArray(wvalue, rs.getArray(5));
+          }
+          else
+          {
+              int idx = 4;
+              for(SignalInfo.Range r : ranges)
+              {
+                  if(r.size() > 1)
+                  {
+                      if(!isWO)
+                      {
+                        convertArray(value, rs.getArray(idx));
+                        ++idx;
+                      }
+                      if(isW)
+                      {
+                        convertArray(wvalue, rs.getArray(idx));
+                        ++idx;
+                      }
+                  }
+                  else
+                  {
+                      idx = extractValue(sigInfo, rs, idx, value, wvalue, isWO, isW, true);
+                  }
+
+              }
+          }
       }
       else
       {
-        switch(sigInfo.dataType)
-        {
-          case BOOLEAN:
-            if(!isWO)
-              value.add(rs.getBoolean(4));
-            if(isW) wvalue.add(rs.getBoolean(5));
-            break;
-          case SHORT:
-          case UCHAR:
-          case LONG:
-          case USHORT:
-          case STATE:
-          case LONG64:
-          case ULONG:
-            if(!isWO)
-              value.add(rs.getLong(4));
-            if(isW) wvalue.add(rs.getLong(5));
-            break;
-          case DOUBLE:
-            if(!isWO)
-              value.add(rs.getDouble(4));
-            if(isW) wvalue.add(rs.getDouble(5));
-            break;
-          case FLOAT:
-            if(!isWO) value.add(rs.getFloat(4));
-            if(isW) wvalue.add(rs.getFloat(5));
-            break;
-          case STRING:
-            if(!isWO) value.add(rs.getString(4));
-            if(isW) wvalue.add(rs.getString(5));
-            break;
-        }
+          extractValue(sigInfo, rs, 4, value, wvalue, isWO, isW);
       }
 
       // Write only attribute, copy write data to read data
@@ -490,24 +902,15 @@ public class PostgreSQLSchema extends HdbReader {
     }
   }
 
-  private void extractAggregateData(ResultSet rs, SignalInfo info, boolean isRW, boolean isWO, int queryCount, Map<HdbData.Aggregate, Integer> indexes, List<HdbData> data) throws SQLException, HdbFailed
+  private void extractAggregateData(ResultSet rs, SignalInfo info, SortedSet<SignalInfo.Range> ranges, boolean isRW, boolean isWO, int queryCount, Map<HdbData.Aggregate, Map<Integer, Boolean>> indexes, List<HdbData> data) throws SQLException, HdbFailed
   {
     int nbRow = 0;
-    boolean isFloating = info.dataType == HdbSigInfo.Type.DOUBLE || info.dataType == HdbSigInfo.Type.FLOAT;
-    boolean isArray = info.isArray();
-    int floatingOffset1 = 0;
-    int floatingOffset2 = 0;
-    if(!isFloating)
-    {
-      floatingOffset1 = 1;
-      floatingOffset2 = 2;
-    }
 
     long dTime = 0;
-    long count_rows = 0;
-    long count_errors = 0;
 
     while (rs.next()) {
+      ArrayList<Long> count_rows = new ArrayList<>();
+      ArrayList<Long> count_errors = new ArrayList<>();
       ArrayList<Long> count_r = new ArrayList<>();
       ArrayList<Long> count_nan_r = new ArrayList<>();
       ArrayList<Double> mean_r = new ArrayList<>();
@@ -522,177 +925,22 @@ public class PostgreSQLSchema extends HdbReader {
       ArrayList<Double> stddev_w = new ArrayList<>();
       dTime = timeValue(rs.getTimestamp(1));
 
-      for(Map.Entry<HdbData.Aggregate, Integer> agg_idx : indexes.entrySet())
-      {
-        HdbData.Aggregate agg = agg_idx.getKey();
-	// We had 2 because indexing start at 1 for sql result
-	// and the first one is always the timestamp.
-        int idx = agg_idx.getValue() + 2;
-	switch(agg)
-	{
-	  case ROWS_COUNT:
-	  {
-	    count_rows = rs.getLong(idx);
-	    break;
-	  }
-	  case ERRORS_COUNT:
-	  {
-	    count_errors = rs.getLong(idx);
-	    break;
-	  }
-	  case COUNT_R:
-	  {
-	    if(isArray)
-	    {
-	      convertLongArray(count_r, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      count_r.add(rs.getLong(idx));
-	    }
-	    break;
-	  }
-	  case NAN_COUNT_R:
-	  {
-	    if(isArray)
-	    {
-	      convertLongArray(count_r, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      count_r.add(rs.getLong(idx));
-	    }
-	    break;
-	  }
-	  case MEAN_R:
-	  {
-	    if(isArray)
-	    {
-	      convertDoubleArray(mean_r, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      mean_r.add(rs.getDouble(idx));
-	    }
-	    break;
-	  }
-	  case MIN_R:
-	  {
-	    if(isArray)
-	    {
-	      convertNumberArray(min_r, rs.getArray(idx), info.dataType);
-	    }
-	    else
-	    {
-	      min_r.add(extractNumber(rs, idx, info.dataType));
-	    }
-	    break;
-	  }
-	  case MAX_R:
-	  {
-	    if(isArray)
-	    {
-	      convertNumberArray(max_r, rs.getArray(idx), info.dataType);
-	    }
-	    else
-	    {
-	      max_r.add(extractNumber(rs, idx, info.dataType));
-	    }
-	    break;
-	  }
-	  case STDDEV_R:
-	  {
-	    if(isArray)
-	    {
-	      convertDoubleArray(stddev_r, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      stddev_r.add(rs.getDouble(idx));
-	    }
-	    break;
-	  }
-	  case COUNT_W:
-	  {
-	    if(isArray)
-	    {
-	      convertLongArray(count_w, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      count_w.add(rs.getLong(idx));
-	    }
-	    break;
-	  }
-	  case NAN_COUNT_W:
-	  {
-	    if(isArray)
-	    {
-	      convertLongArray(count_w, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      count_w.add(rs.getLong(idx));
-	    }
-	    break;
-	  }
-	  case MEAN_W:
-	  {
-	    if(isArray)
-	    {
-	      convertDoubleArray(mean_w, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      mean_w.add(rs.getDouble(idx));
-	    }
-	    break;
-	  }
-	  case MIN_W:
-	  {
-	    if(isArray)
-	    {
-	      convertNumberArray(min_w, rs.getArray(idx), info.dataType);
-	    }
-	    else
-	    {
-	      min_w.add(extractNumber(rs, idx, info.dataType));
-	    }
-	    break;
-	  }
-	  case MAX_W:
-	  {
-	    if(isArray)
-	    {
-	      convertNumberArray(max_w, rs.getArray(idx), info.dataType);
-	    }
-	    else
-	    {
-	      max_w.add(extractNumber(rs, idx, info.dataType));
-	    }
-	    break;
-	  }
-	  case STDDEV_W:
-	  {
-	    if(isArray)
-	    {
-	      convertDoubleArray(stddev_w, rs.getArray(idx));
-	    }
-	    else
-	    {
-	      stddev_w.add(rs.getDouble(idx));
-	    }
-	    break;
-	  }
-	}
-      }
+      extractAggregates(indexes, rs, info.dataType, count_rows, count_errors, count_r, count_nan_r, mean_r, min_r, max_r, stddev_r, count_w, count_nan_w, mean_w, min_w, max_w, stddev_w);
+
+        long count_rows_l = 0;
+        long count_errors_l = 0;
+
+        if(!count_rows.isEmpty())
+            count_rows_l = count_rows.get(0);
+        if(!count_errors.isEmpty())
+            count_errors_l = count_errors.get(0);
 
       HdbData hd = HdbData.createData(info);
 
       hd.parseAggregate(
               dTime,     //Tango timestamp
-              count_rows,
-              count_errors,
+              count_rows_l,
+              count_errors_l,
               count_r,
               count_nan_r,
               mean_r,
@@ -840,7 +1088,7 @@ public class PostgreSQLSchema extends HdbReader {
 
   // ---------------------------------------------------------------------------------------
 
-  private void convertArray(ArrayList<Object> v,Array a) throws SQLException {
+  private void convertArray(List<Object> v,Array a) throws SQLException {
 
     if(a!=null) {
       Object[] objects = (Object[]) a.getArray();
@@ -850,7 +1098,7 @@ public class PostgreSQLSchema extends HdbReader {
 
   }
 
-  private void convertDoubleArray(ArrayList<Double> v,Array a) throws SQLException {
+  private void convertDoubleArray(List<Double> v,Array a) throws SQLException {
 
     if(a!=null) {
       Double[] objects = (Double[]) a.getArray();
@@ -861,7 +1109,7 @@ public class PostgreSQLSchema extends HdbReader {
 
   }
 
-  private void convertNumberArray(ArrayList<Number> v,Array a, HdbSigInfo.Type type) throws SQLException {
+  private void convertNumberArray(List<Number> v,Array a, HdbSigInfo.Type type) throws SQLException {
     if(a!=null) {
       Number[] numbers;
       switch(type) {
@@ -884,7 +1132,7 @@ public class PostgreSQLSchema extends HdbReader {
     }
   }
 
-  private void convertLongArray(ArrayList<Long> v,Array a) throws SQLException {
+  private void convertLongArray(List<Long> v,Array a) throws SQLException {
 
     if(a!=null) {
       Long[] objects = (Long[]) a.getArray();
