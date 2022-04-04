@@ -46,20 +46,32 @@ public abstract class HdbData {
 
   public static enum Aggregate
   {
-    ROWS_COUNT,
-    ERRORS_COUNT,
-    COUNT_R,
-    NAN_COUNT_R,
-    MEAN_R,
-    MIN_R,
-    MAX_R,
-    STDDEV_R,
-    COUNT_W,
-    NAN_COUNT_W,
-    MEAN_W,
-    MIN_W,
-    MAX_W,
-    STDDEV_W,
+    ROWS_COUNT("count_rows"),
+    ERRORS_COUNT("count_errors"),
+    COUNT_R("count_r"),
+    NAN_COUNT_R("count_nan_r"),
+    MEAN_R("mean_r"),
+    MIN_R("min_r"),
+    MAX_R("max_r"),
+    STDDEV_R("stddev_r"),
+    COUNT_W("count_w"),
+    NAN_COUNT_W("count_nan_w"),
+    MEAN_W("mean_w"),
+    MIN_W("min_w"),
+    MAX_W("max_w"),
+    STDDEV_W("stddev_w");
+
+    String description;
+
+    private Aggregate(String desc)
+    {
+      description = desc;
+    }
+
+    public String toString()
+    {
+      return description;
+    }
   }
 
   final protected static Map<Aggregate, List<Number>> EMPTY_AGGREGATE = new EnumMap<>(Aggregate.class);

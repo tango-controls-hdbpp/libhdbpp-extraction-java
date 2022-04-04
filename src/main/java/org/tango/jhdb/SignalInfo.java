@@ -35,6 +35,10 @@ package org.tango.jhdb;
 
 import org.tango.jhdb.data.HdbData;
 import java.util.Set;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 /**
  * Signal info structure
@@ -186,6 +190,45 @@ public class SignalInfo {
     }
   }
 
+  public static class Range implements Comparable<Range>
+  {
+      int start_idx;
+      int end_idx;
+
+      public static Range FULL_RANGE = new Range(Integer.MIN_VALUE, Integer.MAX_VALUE);
+
+      public Range(int start, int end)
+      {
+          start_idx = start;
+          end_idx = end;
+      }
+
+      public String toString()
+      {
+          if(this == FULL_RANGE)
+              return "";
+          // We set +1 as is postgres indexing starts at 1, it should be done differently.
+          if(start_idx == end_idx)
+              return "[" + (start_idx+1) + "]";
+          return "[" + (start_idx+1) + ":" + (end_idx+1) + "]";
+      }
+
+      public int size()
+      {
+          return end_idx - start_idx + 1;
+      }
+
+      @Override
+      public int compareTo(Range o)
+      {
+          if(start_idx != o.start_idx)
+          {
+              return start_idx - o.start_idx;
+          }
+          return end_idx - o.end_idx;
+      }
+  }
+
   public String  name;          // Attribute name
   public String  sigId;         // Identifier
   public Format  format;        // Data type
@@ -196,6 +239,7 @@ public class SignalInfo {
   public Access  access;        // Write only flag
   public Interval interval = Interval.NONE; // interval, for aggregates
   public Set<HdbData.Aggregate> aggregates;
+  public SortedSet<Integer> indexes;  // For arrays, indexes to be extracted
 
   public SignalInfo()
   {
@@ -213,6 +257,7 @@ public class SignalInfo {
     this.access = parent.access;
     this.interval = parent.interval;
     this.aggregates = parent.aggregates;
+    this.indexes = parent.indexes;
   }
 
   protected SignalInfo(Type type, Format fmt, Access acc)
@@ -340,11 +385,46 @@ public class SignalInfo {
    * Returns true if this signal is aggregated data, false if it is raw.
    */
   public boolean isAggregate() {
-        return Interval.isAggregate(interval);
-    }
+    return Interval.isAggregate(interval);
+  }
 
   public String toString() {
     return "Id=" + sigId + ", Type=" + dataType.toString() + ", Format=" + format.toString() + ", Access=" + access.toString()+ ", Interval=" + interval.toString();
+  }
+
+  public SortedSet<Range> getRanges()
+  {
+      SortedSet<Range> ret = new TreeSet<>();
+      if(indexes == null || indexes.isEmpty())
+      {
+          ret.add(Range.FULL_RANGE);
+      }
+      else
+      {
+          int start = -2;
+          int prev = -2;
+          boolean inRange = false;
+          for(int idx : indexes)
+          {
+              if(idx - prev > 1)
+              {
+                  if(inRange)
+                  {
+                      ret.add(new Range(start, prev));
+                      start = idx;
+                  }
+                  else
+                  {
+                      inRange = true;
+                      start = idx;
+                  }
+              }
+              prev = idx;
+          }
+          if(inRange)
+              ret.add(new Range(start, prev));
+      }
+      return ret;
   }
 
   @Override
